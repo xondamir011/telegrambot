@@ -94,3 +94,5 @@ bot.on("message", async (msg) => {
 });
 
 console.log("🤖 AI bot ishlayapti...");
+console.log("BOT TOKEN:", process.env.BOT_TOKEN);
+console.log("OPENROUTER:", process.env.OPENROUTER_API_KEY);
