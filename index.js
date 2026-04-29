@@ -54,7 +54,7 @@ bot.on("message", async (msg) => {
     const response = await axios.post(
       "https://openrouter.ai/api/v1/chat/completions",
       {
-        model: "openai.gpt-4o-mini",
+        model: "mistralai/mistral-7b-instruct",
         messages: [
           {
             role: "system",
