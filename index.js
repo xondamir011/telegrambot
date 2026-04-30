@@ -1,98 +1,145 @@
 import TelegramBot from "node-telegram-bot-api";
-import axios from "axios";
 import dotenv from "dotenv";
+import axios from "axios";
+import { connectDB } from "./db.js";
+import { User, Task, Submission } from "./models.js";
+import { checkCode } from "./ai.js";
 
 dotenv.config();
+connectDB();
 
-const bot = new TelegramBot(process.env.BOT_TOKEN, {
-  polling: true,
-});
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 
-const chats = {};
+let currentTask = null;
 
-// 🌐 LANGUAGE DETECT
-function detectLang(text = "") {
-  const uzWords = [
-    "salom", "nima", "qalay", "rahmat",
-    "yordam", "qanday", "qanaqa", "nega", "qayerda"
-  ];
-
-  return uzWords.some(w => text.toLowerCase().includes(w))
-    ? "uz"
-    : "en";
-}
-
-bot.onText(/\/start/, (msg) => {
-  bot.sendMessage(
-    msg.chat.id,
-    "👋 Salom! Men Xondamirni AI assistentman 😎\nIstalgan savolni berishingiz mumkin!"
-  );
-});
-
-// 💬 MESSAGE
-bot.on("message", async (msg) => {
+// 🟢 START
+bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
 
-  if (!msg.text) return;
-  if (msg.text.startsWith("/")) return;
+  let user = await User.findOne({ chatId });
 
-  const userText = msg.text;
+  if (!user) {
+    user = await User.create({
+      chatId,
+      name: msg.from.first_name
+    });
+  }
 
-  if (!chats[chatId]) chats[chatId] = [];
-  if (chats[chatId].length > 10) chats[chatId].shift();
+  bot.sendMessage(chatId, "👋 Salom! LMS botga xush kelibsiz");
+});
 
-  const lang = detectLang(userText);
+// 👨‍🏫 TEACHER
+bot.onText(/\/teacher/, async (msg) => {
+  await User.updateOne(
+    { chatId: msg.chat.id },
+    { role: "teacher" }
+  );
 
-  chats[chatId].push({
-    role: "user",
-    content: userText,
+  bot.sendMessage(msg.chat.id, "👨‍🏫 Siz teacher bo‘ldingiz");
+});
+
+// 📚 TASK CREATE
+bot.onText(/\/task (.+)/, async (msg, match) => {
+  const user = await User.findOne({ chatId: msg.chat.id });
+
+  if (!user || user.role !== "teacher") {
+    return bot.sendMessage(msg.chat.id, "❌ Faqat teacher");
+  }
+
+  const task = await Task.create({
+    text: match[1]
   });
 
-  try { 
-    bot.sendChatAction(chatId, "typing");
-   
-    const response = await axios.post(
-      "https://openrouter.ai/api/v1/chat/completions",
-      {
-        model: "openai/gpt-3.5-turbo",
-        messages: [
-          {
-            role: "system",
-            content:
-              lang === "uz"
-                ? "Sen o‘zbek tilida juda sodda, aniq va foydali javob beradigan AI assistentsan. Har doim o‘zbek tilida javob ber."
-                : "You are a helpful AI assistant. Always answer clearly in English.",
-          },
-          ...chats[chatId],
-        ],
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
+  currentTask = task;
 
-    const reply = response.data.choices?.[0]?.message?.content || "Javob topilmadi 😅";
+  bot.sendMessage(msg.chat.id, "📚 Task yaratildi!");
+});
 
-    chats[chatId].push({
-      role: "assistant",
-      content: reply,
+// ✍️ TEXT SUBMIT
+bot.onText(/\/submit (.+)/, async (msg, match) => {
+  const user = await User.findOne({ chatId: msg.chat.id });
+
+  if (!currentTask) {
+    return bot.sendMessage(msg.chat.id, "❌ Task yo‘q");
+  }
+
+  const code = match[1];
+
+  const feedback = await checkCode(code);
+
+  await Submission.create({
+    userId: user._id,
+    taskId: currentTask._id,
+    code,
+    score: Math.floor(Math.random() * 10),
+    feedback
+  });
+
+  bot.sendMessage(msg.chat.id, "✅ Yuborildi!\n\n" + feedback);
+});
+
+// 📎 FILE SUBMIT (🔥 CLEAN VERSION)
+bot.on("document", async (msg) => {
+  try {
+    if (!currentTask) {
+      return bot.sendMessage(msg.chat.id, "❌ Task yo‘q");
+    }
+
+    const fileId = msg.document.file_id;
+
+    const file = await bot.getFile(fileId);
+
+    const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
+
+    // 🔥 RAMda olish (downloads YO‘Q)
+    const res = await axios.get(fileUrl);
+
+    const code = res.data;
+
+    const user = await User.findOne({ chatId: msg.chat.id });
+
+    const feedback = await checkCode(code);
+
+    await Submission.create({
+      userId: user._id,
+      taskId: currentTask._id,
+      code,
+      score: Math.floor(Math.random() * 10),
+      feedback
     });
 
-    bot.sendMessage(chatId, reply);
+    bot.sendMessage(msg.chat.id, "📎 File qabul qilindi\n\n" + feedback);
 
   } catch (err) {
-    console.log("ERROR:", err?.response?.data || err.message);
-
-    bot.sendMessage(
-      chatId,
-      "😅 AI hozir javob bera olmayapti. Keyinroq urinib ko‘ring."
-    );
+    console.log("FILE ERROR:", err.message);
+    bot.sendMessage(msg.chat.id, "❌ File o‘qishda xato");
   }
 });
 
-console.log("🤖 AI bot ishlayapti...");
-console.log("BOT TOKEN:", process.env.BOT_TOKEN);
-console.log("OPENROUTER:", process.env.OPENROUTER_API_KEY);
+// 📊 STATUS
+bot.onText(/\/status/, async (msg) => {
+  if (!currentTask) {
+    return bot.sendMessage(msg.chat.id, "❌ Task yo‘q");
+  }
+
+  const users = await User.find({ role: "student" });
+  const subs = await Submission.find({ taskId: currentTask._id });
+
+  const done = subs.map(s => s.userId.toString());
+
+  const notDone = users.filter(u => !done.includes(u._id.toString()));
+
+  let text = "📊 Topshirmaganlar:\n\n";
+
+  if (notDone.length === 0) {
+    text += "🎉 Hamma topshirgan!";
+  } else {
+    notDone.forEach(u => {
+      text += `❌ ${u.name}\n`;
+    });
+  }
+
+  bot.sendMessage(msg.chat.id, text);
+});
+
+console.log("🤖 BOT ISHLAYAPTI...");
